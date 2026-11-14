@@ -1,0 +1,3 @@
+{"at": "2026-11-14T02:18:11.464637+00:00", "type": "levers", "register": "survey", "inference_depth": "standard"}
+{"at": "2026-11-14T02:18:11.788975+00:00", "type": "step", "step": "1", "status": "done", "chapter": null, "force": false}
+{"at": "2026-11-14T02:18:11.795646+00:00", "type": "spend_reconcile", "sources_fetched": 0, "notes_written": 0, "agents_spawned": 0, "estimated_usd": 0.0, "max_sources": null, "max_notes": null, "blocked_on": null}

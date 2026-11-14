@@ -1,0 +1,34 @@
+{
+  "sub_questions": [
+    "Which Google Play Store apps are similar to CrazyGames or Playgama (multi-game instant/HTML5 game portal apps offering many free games in one app)?",
+    "What is the user base of each app (Play Store install count band, plus MAU/MAU estimates where available)?",
+    "How do these apps rank from largest to smallest user base?",
+    "What do CrazyGames and Playgama themselves have on the Play Store (reference baseline)?"
+  ],
+  "entities": [
+    {"name": "CrazyGames", "type": "reference-platform", "required_fields": ["play store presence", "user base"]},
+    {"name": "Playgama", "type": "reference-platform", "required_fields": ["play store presence", "user base"]},
+    {"name": "similar Play Store game-portal apps", "type": "category", "required_fields": ["app name", "developer", "what it is", "Play Store installs", "other user metrics", "rank"]}
+  ],
+  "required_formats": ["ranked list/table ordered from largest to smallest user base"],
+  "required_sections": [],
+  "required_section_headings": [
+    "## 1. Riferimento: CrazyGames e Playgama",
+    "## 2. Classifica delle app simili sul Play Store per base utenti",
+    "## 3. Schede delle singole app",
+    "## 4. Note su come leggere i numeri"
+  ],
+  "time_horizons": ["current (2026)"],
+  "time_periods": [{"period": "as of November 2026", "type": "as-of", "primary_source": "Google Play Store listing install counts", "issuer": "Google Play"}],
+  "scope_conditions": ["apps available on Google Play Store", "similar = aggregator/portal of many free casual/HTML5/instant games, not a single game"],
+  "pipeline_tier": "light",
+  "response_format": "structured",
+  "citation_style": "inline",
+  "levers": {
+    "register": "survey",
+    "register_confidence": "high",
+    "domain_notes": "Sourcing: Google Play Store listings are the primary source for install bands; app-intelligence sites (AppBrain, Sensor Tower, AppMagic, 42matters) and company press releases for MAU and precise install estimates. Install bands (e.g. 10M+) are lower bounds, not active users; distinguish installs from MAU. Recency: current listings (2025-2026) matter most.",
+    "inference_depth": "standard",
+    "rationale": {"register": "user asks to find and list apps ranked by a metric — coverage-shaped", "inference_depth": "public store data should suffice"}
+  }
+}

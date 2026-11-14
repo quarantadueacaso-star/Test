@@ -1,0 +1,50 @@
+{
+  "manifest_version": 1,
+  "vault_tag": "playstore-webgame-apps-users-df14bc",
+  "profile": "full",
+  "profile_steps": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16"
+  ],
+  "status": "blocked",
+  "started_at": "2026-11-14T02:17:53.813532+00:00",
+  "updated_at": "2026-11-14T02:20:36.900635+00:00",
+  "budget_usd": null,
+  "max_sources": null,
+  "max_notes": null,
+  "counts_force_cleared": 0,
+  "counts_clear_baselines": {},
+  "blocked_on": "vault-fetch-unavailable",
+  "steps": {
+    "1": {
+      "status": "done",
+      "finished_at": "2026-11-14T02:18:11.787003+00:00"
+    }
+  },
+  "chapters": {},
+  "spend": {
+    "estimated_usd": 0.0,
+    "sources_fetched": 0,
+    "notes_written": 0,
+    "agents_spawned": 0
+  },
+  "levers": {
+    "register": "survey",
+    "inference_depth": "standard",
+    "domain_notes": "Sourcing: Google Play Store listings are the primary source for install bands; app-intelligence sites (AppBrain, Sensor Tower, AppMagic, 42matters) and company press releases for MAU and precise install estimates. Install bands (e.g. 10M+) are lower bounds, not active users; distinguish installs from MAU. Recency: current listings (2025-2026) matter most."
+  }
+}
