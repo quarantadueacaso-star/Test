@@ -1,0 +1,1472 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nottola">
+<meta name="theme-color" content="#090c26">
+<title>Nottola — volo notturno</title>
+<!-- Icona inline: evita la richiesta di /favicon.ico (e il relativo errore in console) -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23090c26'/%3E%3Ccircle cx='11' cy='5' r='3' fill='%23fff1c4'/%3E%3Ccircle cx='7' cy='10' r='4' fill='%23ff9d3c'/%3E%3C/svg%3E">
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #05071a;
+  }
+  body {
+    position: fixed;            /* blocca lo scroll elastico su iOS */
+    left: 0; top: 0; right: 0; bottom: 0;
+    touch-action: none;         /* niente zoom/scroll gestiti dal browser */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  /* Contenitore a schermo intero che rispetta le safe area (notch, barra home) */
+  #palco {
+    position: fixed;
+    left: 0; top: 0; right: 0;
+    height: 100vh;              /* ripiego per browser senza dvh */
+    height: 100dvh;             /* altezza reale su iOS/Android */
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #gioco {
+    display: block;
+    touch-action: none;
+    cursor: pointer;
+    image-rendering: pixelated;
+    background: #090c26;
+  }
+  /* Avviso "ruota il telefono": solo telefoni in orizzontale */
+  #ruota {
+    display: none;
+    position: fixed;
+    left: 0; top: 0; right: 0; bottom: 0;
+    z-index: 10;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: #090c26;
+    color: #fff1c4;
+    font: bold 18px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #ruota span { display: block; font-size: 44px; line-height: 1.2; }
+  @media (orientation: landscape) and (max-height: 480px) and (pointer: coarse) {
+    #ruota { display: flex; }
+  }
+</style>
+</head>
+<body>
+<div id="palco">
+  <canvas id="gioco" width="288" height="512" aria-label="Nottola: tocca o premi spazio per volare"></canvas>
+</div>
+<div id="ruota" aria-hidden="true"><div><span>&#8635;</span>Ruota il telefono<br>in verticale per giocare</div></div>
+<noscript>Per giocare serve JavaScript attivo.</noscript>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ====================================================================
+     1. COSTANTI DI CONFIGURAZIONE
+     --------------------------------------------------------------------
+     I valori di fisica sono espressi "per frame" a 60 fps. Il gioco
+     avanza con un passo fisso a 60 Hz (vedi il ciclo in fondo), quindi
+     la velocità è identica su schermi a 60, 90 o 120 Hz.
+     ==================================================================== */
+
+  // --- Schermo logico (fisso; viene scalato per riempire lo schermo) ---
+  const LARGHEZZA = 288;
+  const ALTEZZA = 512;
+  const PASSO_MS = 1000 / 60;            // durata di un passo logico
+
+  // --- Fisica ---
+  const GRAVITA = 0.25;                  // px/frame² verso il basso
+  const IMPULSO_SALTO = -4.6;            // px/frame: velocità impostata a ogni battito
+  const VEL_MAX_CADUTA = 8;              // px/frame: limite di velocità in caduta
+  const VEL_SCORRIMENTO = 2;             // px/frame: velocità di ostacoli e terreno
+
+  // --- Ostacoli (colonne di pietra) ---
+  const APERTURA = 100;                  // altezza del varco tra colonna alta e bassa
+  const DISTANZA_OSTACOLI = 150;         // distanza orizzontale tra una coppia e la successiva (da inizio a inizio)
+  const LARGHEZZA_OSTACOLO = 52;         // larghezza della colonna (e della sua hitbox)
+  const MARGINE_APERTURA = 56;           // distanza minima del varco da cielo e terreno
+  const ANTICIPO_PRIMO_OSTACOLO = 60;    // px oltre il bordo destro prima della prima coppia
+
+  // --- Terreno ---
+  const ALTEZZA_TERRENO = 112;
+  const Y_TERRENO = ALTEZZA - ALTEZZA_TERRENO;
+
+  // --- Pipistrello ---
+  const PIP_X = 72;                      // posizione orizzontale fissa durante il gioco
+  const Y_ATTESA = 236;                  // quota a cui fluttua prima della partenza
+  const RAGGIO_HITBOX = 9;               // hitbox circolare, più piccola dello sprite
+  const ROT_SU = -25 * Math.PI / 180;    // inclinazione dopo il battito
+  const ROT_GIU = 90 * Math.PI / 180;    // inclinazione massima in picchiata
+  const VEL_ROT_SU = 20 * Math.PI / 180; // rad/frame: quanto in fretta alza il muso
+  const VEL_ROT_GIU = 6 * Math.PI / 180; // rad/frame: quanto in fretta lo abbassa
+  const SOGLIA_PICCHIATA = 2.2;          // velocità di caduta oltre cui inizia a ruotare in giù
+  const TICK_PER_FRAME_ALA = 5;          // durata (in tick) di ogni fotogramma delle ali
+
+  // --- Interfaccia e tempi (in tick: 60 tick = 1 secondo) ---
+  const RITARDO_RIGIOCA = 30;            // attesa prima che "Gioca ancora" sia attivo (~0,5 s)
+  const ATTESA_PANNELLO = 30;            // pausa tra l'arrivo a terra e il pannello finale
+  const DURATA_FLASH = 8;                // durata del lampo bianco all'impatto
+  const DURATA_DISSOLVENZA = 8;          // metà durata della dissolvenza tra schermate
+  const MEDAGLIE = [                     // dalla più alta alla più bassa
+    { min: 40, nome: 'PLATINO', base: '#bfe9ee', chiaro: '#ffffff', scuro: '#6fa9b8' },
+    { min: 30, nome: 'ORO',     base: '#f5c542', chiaro: '#fff3a8', scuro: '#b07f16' },
+    { min: 20, nome: 'ARGENTO', base: '#b9c2d6', chiaro: '#f1f4fb', scuro: '#7a849c' },
+    { min: 10, nome: 'BRONZO',  base: '#c9803e', chiaro: '#f2b77c', scuro: '#87491b' }
+  ];
+
+  // --- Audio e salvataggio ---
+  const VOLUME = 0.5;
+  const CHIAVE_RECORD = 'nottola.record';
+  const CHIAVE_AUDIO = 'nottola.audio';
+
+  // --- Colori ricorrenti ---
+  const C = {
+    contorno: '#0b0d24',
+    crema: '#fff1c4',
+    arancio: '#ff9d3c',
+    ciano: '#8ff7ff',
+    bianco: '#ffffff'
+  };
+
+
+  /* ====================================================================
+     2. UTILITÀ
+     ==================================================================== */
+
+  function limita(v, min, max) { return v < min ? min : (v > max ? max : v); }
+
+  function casualeIntero(min, max) {
+    return min + Math.floor(Math.random() * (max - min + 1));
+  }
+
+  // Generatore pseudo-casuale con seme: serve a disegnare sempre le stesse
+  // decorazioni (stelle, alberi, crepe) a ogni avvio.
+  function creaCasuale(seme) {
+    let a = seme >>> 0;
+    return function () {
+      a = (a + 0x6D2B79F5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // localStorage può non essere disponibile (navigazione privata, file://
+  // con restrizioni, iframe): ogni accesso è protetto da try/catch.
+  function leggiMemoria(chiave, predefinito) {
+    try {
+      const v = window.localStorage.getItem(chiave);
+      return v === null ? predefinito : v;
+    } catch (e) {
+      return predefinito;
+    }
+  }
+  function scriviMemoria(chiave, valore) {
+    try { window.localStorage.setItem(chiave, valore); } catch (e) { /* ignorato */ }
+  }
+
+  // Crea una tela fuori schermo e restituisce [tela, contesto]
+  function nuovaTela(w, h) {
+    const t = document.createElement('canvas');
+    t.width = w;
+    t.height = h;
+    const x = t.getContext('2d');
+    x.imageSmoothingEnabled = false;
+    return [t, x];
+  }
+
+  // Tutta la grafica è disegnata a metà risoluzione e poi raddoppiata:
+  // ogni "pixel artistico" occupa 2×2 pixel logici (look pixel-art coerente).
+  function raddoppia(tela) {
+    const [t, x] = nuovaTela(tela.width * 2, tela.height * 2);
+    x.drawImage(tela, 0, 0, t.width, t.height);
+    return t;
+  }
+
+  function capovolgi(tela) {
+    const [t, x] = nuovaTela(tela.width, tela.height);
+    x.translate(0, tela.height);
+    x.scale(1, -1);
+    x.drawImage(tela, 0, 0);
+    return t;
+  }
+
+  // Disco "a pixel" pieno
+  function cerchio(x, cx, cy, r, colore) {
+    x.fillStyle = colore;
+    const rr = (r + 0.5) * (r + 0.5);
+    for (let dy = -r; dy <= r; dy++) {
+      const w = Math.floor(Math.sqrt(rr - dy * dy));
+      x.fillRect(cx - w, cy + dy, w * 2 + 1, 1);
+    }
+  }
+
+
+  /* ====================================================================
+     3. TELA E RIDIMENSIONAMENTO
+     --------------------------------------------------------------------
+     Il gioco viene disegnato su un buffer 288×512 e poi copiato sulla
+     tela visibile, scalata mantenendo le proporzioni (letterbox) e
+     moltiplicata per devicePixelRatio per gli schermi ad alta densità.
+     ==================================================================== */
+
+  const palco = document.getElementById('palco');
+  const tela = document.getElementById('gioco');
+  const ctx = tela.getContext('2d', { alpha: false });
+
+  const [buffer, g] = nuovaTela(LARGHEZZA, ALTEZZA);   // "g" = contesto di disegno del gioco
+
+  // Telefono in orizzontale: mostriamo l'avviso e sospendiamo l'input
+  const mqRuota = window.matchMedia('(orientation: landscape) and (max-height: 480px) and (pointer: coarse)');
+  const puntatorePreciso = window.matchMedia('(pointer: fine)').matches;
+
+  function ridimensiona() {
+    // Su iOS 100vh include la barra degli indirizzi: usiamo l'altezza reale
+    palco.style.height = window.innerHeight + 'px';
+
+    const st = window.getComputedStyle(palco);
+    const dispW = palco.clientWidth - (parseFloat(st.paddingLeft) || 0) - (parseFloat(st.paddingRight) || 0);
+    const dispH = palco.clientHeight - (parseFloat(st.paddingTop) || 0) - (parseFloat(st.paddingBottom) || 0);
+
+    const scala = Math.max(0.1, Math.min(dispW / LARGHEZZA, dispH / ALTEZZA));
+    const cssW = Math.max(1, Math.floor(LARGHEZZA * scala));
+    const cssH = Math.max(1, Math.floor(ALTEZZA * scala));
+    const dpr = Math.min(window.devicePixelRatio || 1, 4);
+
+    tela.style.width = cssW + 'px';
+    tela.style.height = cssH + 'px';
+    const pw = Math.round(cssW * dpr);
+    const ph = Math.round(cssH * dpr);
+    if (tela.width !== pw || tela.height !== ph) {
+      tela.width = pw;
+      tela.height = ph;
+    }
+    ctx.imageSmoothingEnabled = false;   // si azzera a ogni cambio di dimensione
+  }
+
+
+  /* ====================================================================
+     4. GRAFICA GENERATA VIA CODICE
+     --------------------------------------------------------------------
+     Nessuna immagine esterna: font, sprite e sfondi sono disegnati qui
+     una sola volta su tele fuori schermo e poi riutilizzati.
+     ==================================================================== */
+
+  /* ---------- 4.1 Font bitmap 5×7 ---------- */
+  const FONT = {};
+  (function () {
+    const dati = {
+      'A': '.###./#...#/#...#/#####/#...#/#...#/#...#',
+      'B': '####./#...#/#...#/####./#...#/#...#/####.',
+      'C': '.###./#...#/#..../#..../#..../#...#/.###.',
+      'D': '####./#...#/#...#/#...#/#...#/#...#/####.',
+      'E': '#####/#..../#..../####./#..../#..../#####',
+      'F': '#####/#..../#..../####./#..../#..../#....',
+      'G': '.###./#...#/#..../#.###/#...#/#...#/.###.',
+      'H': '#...#/#...#/#...#/#####/#...#/#...#/#...#',
+      'I': '.###./..#../..#../..#../..#../..#../.###.',
+      'J': '..###/...#./...#./...#./...#./#..#./.##..',
+      'K': '#...#/#..#./#.#../##.../#.#../#..#./#...#',
+      'L': '#..../#..../#..../#..../#..../#..../#####',
+      'M': '#...#/##.##/#.#.#/#.#.#/#...#/#...#/#...#',
+      'N': '#...#/##..#/#.#.#/#..##/#...#/#...#/#...#',
+      'O': '.###./#...#/#...#/#...#/#...#/#...#/.###.',
+      'P': '####./#...#/#...#/####./#..../#..../#....',
+      'Q': '.###./#...#/#...#/#...#/#.#.#/#..#./.##.#',
+      'R': '####./#...#/#...#/####./#.#../#..#./#...#',
+      'S': '.####/#..../#..../.###./....#/....#/####.',
+      'T': '#####/..#../..#../..#../..#../..#../..#..',
+      'U': '#...#/#...#/#...#/#...#/#...#/#...#/.###.',
+      'V': '#...#/#...#/#...#/#...#/#...#/.#.#./..#..',
+      'W': '#...#/#...#/#...#/#.#.#/#.#.#/##.##/#...#',
+      'X': '#...#/#...#/.#.#./..#../.#.#./#...#/#...#',
+      'Y': '#...#/#...#/.#.#./..#../..#../..#../..#..',
+      'Z': '#####/....#/...#./..#../.#.../#..../#####',
+      '0': '.###./#...#/#..##/#.#.#/##..#/#...#/.###.',
+      '1': '..#../.##../..#../..#../..#../..#../.###.',
+      '2': '.###./#...#/....#/...#./..#../.#.../#####',
+      '3': '####./....#/....#/.###./....#/....#/####.',
+      '4': '...#./..##./.#.#./#..#./#####/...#./...#.',
+      '5': '#####/#..../####./....#/....#/#...#/.###.',
+      '6': '.###./#..../#..../####./#...#/#...#/.###.',
+      '7': '#####/....#/...#./..#../..#../..#../..#..',
+      '8': '.###./#...#/#...#/.###./#...#/#...#/.###.',
+      '9': '.###./#...#/#...#/.####/....#/....#/.###.',
+      '!': '..#../..#../..#../..#../..#../...../..#..',
+      '?': '.###./#...#/....#/...#./..#../...../..#..',
+      ':': '...../..#../...../...../...../..#../.....',
+      '-': '...../...../...../.###./...../...../.....',
+      '.': '...../...../...../...../...../...../..#..'
+    };
+    for (const k in dati) FONT[k] = dati[k].split('/');
+  })();
+
+  function larghezzaTesto(s, scala) { return (s.length * 6 - 1) * scala; }
+
+  function disegnaGlifi(x, s, x0, y0, scala) {
+    for (let i = 0; i < s.length; i++) {
+      const gl = FONT[s[i]];
+      if (!gl) continue;                               // spazio o carattere sconosciuto
+      for (let r = 0; r < 7; r++) {
+        for (let c = 0; c < 5; c++) {
+          if (gl[r][c] === '#') x.fillRect(x0 + (i * 6 + c) * scala, y0 + r * scala, scala, scala);
+        }
+      }
+    }
+  }
+
+  // Le scritte vengono disegnate una volta e tenute in memoria
+  const cacheTesti = new Map();
+
+  function immagineTesto(s, scala, colore, contorno, ombra) {
+    const chiave = s + '|' + scala + '|' + colore + '|' + contorno + '|' + ombra;
+    let im = cacheTesti.get(chiave);
+    if (im) return im;
+    if (cacheTesti.size > 400) cacheTesti.clear();
+
+    const sp = contorno ? (scala >= 2 ? 2 : 1) : 0;    // spessore del contorno
+    const [t, x] = nuovaTela(larghezzaTesto(s, scala) + sp * 2, 7 * scala + sp * 2 + ombra);
+    if (contorno) {
+      x.fillStyle = contorno;
+      const spostY = ombra ? [-sp, 0, sp, sp + ombra] : [-sp, 0, sp];
+      for (const oy of spostY) {
+        for (const ox of [-sp, 0, sp]) disegnaGlifi(x, s, sp + ox, sp + oy, scala);
+      }
+    }
+    x.fillStyle = colore;
+    disegnaGlifi(x, s, sp, sp, scala);
+    im = { tela: t, sp: sp };
+    cacheTesti.set(chiave, im);
+    return im;
+  }
+
+  // Scrive sul buffer di gioco. opz: { allinea: 'c'|'s'|'d', contorno, ombra }
+  function testo(s, x, y, scala, colore, opz) {
+    opz = opz || {};
+    const contorno = opz.contorno === undefined ? C.contorno : opz.contorno;
+    const im = immagineTesto(s, scala, colore, contorno, opz.ombra || 0);
+    const w = larghezzaTesto(s, scala);
+    const allinea = opz.allinea || 'c';
+    let px = x;
+    if (allinea === 'c') px = x - w / 2;
+    else if (allinea === 'd') px = x - w;
+    g.drawImage(im.tela, Math.round(px) - im.sp, Math.round(y) - im.sp);
+  }
+
+  /* ---------- 4.2 Sprite da mappe di caratteri ---------- */
+
+  // Ogni carattere della mappa è un colore della tavolozza ('.' = trasparente)
+  function spriteDaMappa(righe, tavolozza) {
+    const [t, x] = nuovaTela(righe[0].length, righe.length);
+    for (let r = 0; r < righe.length; r++) {
+      for (let c = 0; c < righe[r].length; c++) {
+        const col = tavolozza[righe[r][c]];
+        if (col) { x.fillStyle = col; x.fillRect(c, r, 1, 1); }
+      }
+    }
+    return t;
+  }
+
+  // Icona monocromatica con contorno scuro, già raddoppiata
+  function iconaDaMappa(righe, colore) {
+    const base = spriteDaMappa(righe, { '#': colore });
+    const ombra = spriteDaMappa(righe, { '#': C.contorno });
+    const [t, x] = nuovaTela(base.width + 2, base.height + 2);
+    for (let oy = 0; oy <= 2; oy++) for (let ox = 0; ox <= 2; ox++) x.drawImage(ombra, ox, oy);
+    x.drawImage(base, 1, 1);
+    return raddoppia(t);
+  }
+
+  /* ---------- 4.3 Il pipistrello (3 fotogrammi di ali) ---------- */
+
+  // Aggiunge un contorno scuro di 1 pixel attorno a tutto ciò che è disegnato
+  function conContorno(tela, colore) {
+    const [sagoma, sx] = nuovaTela(tela.width, tela.height);
+    sx.drawImage(tela, 0, 0);
+    sx.globalCompositeOperation = 'source-in';
+    sx.fillStyle = colore;
+    sx.fillRect(0, 0, sagoma.width, sagoma.height);
+    const [t, x] = nuovaTela(tela.width + 2, tela.height + 2);
+    x.drawImage(sagoma, 1, 0); x.drawImage(sagoma, 1, 2);
+    x.drawImage(sagoma, 0, 1); x.drawImage(sagoma, 2, 1);
+    x.drawImage(tela, 1, 1);
+    return t;
+  }
+
+  const TAV_PIP = {
+    b: '#f6f7ff',   // pelo bianco
+    s: '#c3c9ea',   // ombra del pelo
+    e: '#ffab3d',   // orecchie
+    k: '#1a1030',   // occhi e bocca
+    n: '#ff8a5c',   // nasino
+    p: '#ffc0cf',   // guancia
+    m: '#f0803a',   // membrana dell'ala
+    l: '#ffc56e'    // bordo d'attacco dell'ala, in luce
+  };
+  const CONTORNO_PIP = '#141033';
+
+  const MAPPA_CORPO = [
+    '..e......e...',
+    '..ee.....ee..',
+    '..eebbbbbee..',
+    '.bbbbbbbbbbb.',
+    'bbbbbbbbbbbbb',
+    'bbbbbbbbkbbkb',
+    'bbbbbbbbkbbkb',
+    'bbbbbbbpbbnbb',
+    'sbbbbbbbbkkbb',
+    'ssbbbbbbbbbbb',
+    '.sssbbbbbbbb.',
+    '..ssssssbb...'
+  ];
+
+  // Ali: alta, a metà, bassa. dx/dy = posizione nello sprite (in pixel artistici).
+  // Il bordo frastagliato è quello tipico della membrana dei pipistrelli.
+  const ALI = [
+    { dx: 5, dy: 2, mappa: [
+      '.l........',
+      '.ll.......',
+      '.mll......',
+      'mmmll.....',
+      'mmmmll....',
+      'mmmmmll...',
+      'mmmmmmll..',
+      'm.mmmmmll.',
+      '..mm.mmmll',
+      '..m...mmmm'
+    ] },
+    { dx: 3, dy: 9, mappa: [
+      '....ll......',
+      '.lllllllllll',
+      'lllmmmmmmmmm',
+      'mmmmmmmmmmm.',
+      'mm.mmm.mmm..',
+      'm...m...m...'
+    ] },
+    { dx: 5, dy: 11, mappa: [
+      '..m...mmmm',
+      '..mm.mmmll',
+      'm.mmmmmll.',
+      'mmmmmmll..',
+      'mmmmmll...',
+      'mmmmll....',
+      'mmmll.....',
+      '.mll......',
+      '.ll.......',
+      '.l........'
+    ] }
+  ];
+
+  const SPRITE_PIP = ALI.map(function (ala) {
+    const [t, x] = nuovaTela(26, 24);
+    x.drawImage(conContorno(spriteDaMappa(MAPPA_CORPO, TAV_PIP), CONTORNO_PIP), 10, 5);
+    x.drawImage(conContorno(spriteDaMappa(ala.mappa, TAV_PIP), CONTORNO_PIP), ala.dx, ala.dy);
+    return raddoppia(t);
+  });
+  const ANCORA_PIP_X = 35;               // centro del corpo dentro lo sprite (px logici)
+  const ANCORA_PIP_Y = 27;
+  const SEQUENZA_ALI = [0, 1, 2, 1];     // su, metà, giù, metà
+
+  /* ---------- 4.4 Cielo notturno, luna e stelle ---------- */
+  const LUNA_X = 30, LUNA_Y = 27;        // centro della luna (in pixel artistici)
+
+  function creaCielo() {
+    const W = LARGHEZZA / 2, H = ALTEZZA / 2;
+    const [t, x] = nuovaTela(W, H);
+    const bande = [
+      [0, '#090c26'], [30, '#0c1130'], [60, '#10173d'], [88, '#151e4d'],
+      [112, '#1b275e'], [134, '#22326f'], [152, '#2a3e80'], [168, '#344c90'], [182, '#3f5aa0']
+    ];
+    for (let i = 0; i < bande.length; i++) {
+      const y0 = bande[i][0];
+      const y1 = i + 1 < bande.length ? bande[i + 1][0] : H;
+      x.fillStyle = bande[i][1];
+      x.fillRect(0, y0, W, y1 - y0);
+      // retino tra una banda e la successiva (sfumatura in stile pixel-art)
+      if (i + 1 < bande.length) {
+        x.fillStyle = bande[i + 1][1];
+        for (let px = 0; px < W; px += 2) {
+          x.fillRect(px, y1 - 1, 1, 1);
+          x.fillRect(px + 1, y1 - 2, 1, 1);
+        }
+        for (let px = 0; px < W; px += 4) {
+          x.fillRect(px, y1 - 3, 1, 1);
+          x.fillRect(px + 2, y1 - 4, 1, 1);
+        }
+      }
+    }
+    // luna con alone e crateri
+    const mx = LUNA_X, my = LUNA_Y;
+    x.globalAlpha = 0.05; cerchio(x, mx, my, 25, C.crema);
+    x.globalAlpha = 0.07; cerchio(x, mx, my, 19, C.crema);
+    x.globalAlpha = 1;
+    cerchio(x, mx, my, 13, '#dcc98e');
+    cerchio(x, mx + 1, my - 1, 11, C.crema);
+    cerchio(x, mx - 3, my - 4, 2, '#e9d9a4');
+    cerchio(x, mx + 5, my + 3, 3, '#e9d9a4');
+    cerchio(x, mx - 2, my + 6, 1, '#e9d9a4');
+    cerchio(x, mx + 6, my - 6, 1, '#e9d9a4');
+    return raddoppia(t);
+  }
+
+  // Stelle: posizioni fisse, luminosità che pulsa nel tempo
+  const STELLE = (function () {
+    const rnd = creaCasuale(1234);
+    const lista = [];
+    while (lista.length < 46) {
+      const sx = Math.floor(rnd() * 144), sy = Math.floor(rnd() * 150);
+      const dx = sx - LUNA_X, dy = sy - LUNA_Y;
+      if (dx * dx + dy * dy < 30 * 30) continue;        // non sopra la luna
+      lista.push({ x: sx * 2, y: sy * 2, fase: rnd() * 6.28, vel: 0.02 + rnd() * 0.05, grande: rnd() < 0.15 });
+    }
+    return lista;
+  })();
+
+  /* ---------- 4.5 Colline e bosco (strati in parallasse, ripetibili) ---------- */
+  function creaColline(colore, bordo, base, ampiezza, f1, f2, fase) {
+    const W = LARGHEZZA / 2, H = 90;
+    const [t, x] = nuovaTela(W, H);
+    for (let px = 0; px < W; px++) {
+      // frequenze intere: il profilo si richiude senza giunture
+      const a = px / W * Math.PI * 2;
+      const h = Math.round(base + ampiezza * Math.sin(a * f1 + fase) + ampiezza * 0.5 * Math.sin(a * f2 + fase * 2.7));
+      x.fillStyle = colore; x.fillRect(px, H - h, 1, h);
+      x.fillStyle = bordo;  x.fillRect(px, H - h, 1, 1);
+    }
+    return raddoppia(t);
+  }
+
+  function creaBosco() {
+    const W = LARGHEZZA / 2, H = 70;
+    const [t, x] = nuovaTela(W, H);
+    const rnd = creaCasuale(42);
+    x.fillStyle = '#0a0e2c';
+
+    function pino(cx, h) {
+      const livelli = 3;
+      const hl = Math.floor((h - 3) / livelli);
+      for (const o of [-W, 0, W]) {                     // ripetuto ai bordi per la ripetizione
+        const bx = cx + o;
+        x.fillRect(bx, H - 4, 1, 4);
+        for (let l = 0; l < livelli; l++) {
+          for (let r = 0; r <= hl; r++) {
+            const w = Math.floor(r * 0.5 * (1 + l * 0.5));
+            x.fillRect(bx - w, H - h + l * hl + r, w * 2 + 1, 1);
+          }
+        }
+      }
+    }
+    function colonnaRotta(cx, h) {
+      for (const o of [-W, 0, W]) {
+        x.fillRect(cx + o - 2, H - h, 4, h);
+        x.fillRect(cx + o - 3, H - h, 6, 1);
+        x.fillRect(cx + o - 3, H - 2, 6, 2);
+      }
+    }
+
+    let px = 5;
+    while (px < W - 4) {
+      if (rnd() < 0.2) colonnaRotta(px, 10 + Math.floor(rnd() * 12));
+      else pino(px, 14 + Math.floor(rnd() * 26));
+      px += 7 + Math.floor(rnd() * 13);
+    }
+    x.fillRect(0, H - 2, W, 2);
+    return raddoppia(t);
+  }
+
+  /* ---------- 4.6 Terreno: muschio a strisce sopra un lastricato ---------- */
+  const PERIODO_TERRENO = 24;            // ogni quanti px logici il disegno si ripete
+
+  function creaTerreno() {
+    const W = LARGHEZZA / 2 + PERIODO_TERRENO / 2;
+    const H = ALTEZZA_TERRENO / 2 + 4;
+    const [t, x] = nuovaTela(W, H);
+
+    x.fillStyle = C.contorno; x.fillRect(0, 0, W, 1);
+    x.fillStyle = '#a6f7cf';  x.fillRect(0, 1, W, 1);
+    for (let py = 2; py <= 5; py++) {                   // strisce diagonali
+      for (let px = 0; px < W; px++) {
+        x.fillStyle = ((px + py) % 6) < 3 ? '#4cc79a' : '#2f9e86';
+        x.fillRect(px, py, 1, 1);
+      }
+    }
+    x.fillStyle = '#1b6f66';  x.fillRect(0, 6, W, 1);
+    x.fillStyle = C.contorno; x.fillRect(0, 7, W, 1);
+
+    const toni = ['#2c3368', '#272d5e', '#232853', '#1f2349', '#1b1f40', '#181b39', '#15182f'];
+    for (let riga = 0, y = 8; y < H; riga++, y += 7) {
+      x.fillStyle = toni[Math.min(riga, toni.length - 1)];
+      x.fillRect(0, y, W, 6);
+      x.fillStyle = 'rgba(255,255,255,0.08)';
+      x.fillRect(0, y, W, 1);
+      x.fillStyle = '#10122c';
+      x.fillRect(0, y + 6, W, 1);
+      for (let px = (riga % 2) * 6; px < W; px += 12) x.fillRect(px, y, 1, 6);
+    }
+    return raddoppia(t);
+  }
+
+  /* ---------- 4.7 Colonne di pietra con rune luminose ---------- */
+  const RUNE = [
+    ['#.#', '#.#', '.#.', '#.#', '#.#'],
+    ['.#.', '###', '.#.', '.#.', '.#.'],
+    ['#..', '##.', '#.#', '##.', '#..'],
+    ['.#.', '#.#', '#.#', '#.#', '.#.'],
+    ['#.#', '#.#', '###', '..#', '..#']
+  ];
+
+  function creaColonna() {
+    const W = LARGHEZZA_OSTACOLO / 2 + 2;               // capitello 1 px artistico più largo per lato
+    const H = Y_TERRENO / 2;
+    const CAP = 12;                                     // altezza del capitello
+    const [t, x] = nuovaTela(W, H);
+    const rnd = creaCasuale(7);
+
+    // fusto: fasce verticali dalla luce (sinistra) all'ombra (destra)
+    const fasce = [[1, C.contorno], [1, '#e3e9ff'], [3, '#b9c4ec'], [7, '#98a6d6'],
+                   [7, '#7c8abf'], [4, '#606da1'], [2, '#48527f'], [1, C.contorno]];
+    let px = 1;
+    for (const f of fasce) { x.fillStyle = f[1]; x.fillRect(px, 0, f[0], H); px += f[0]; }
+
+    // giunti tra i blocchi
+    x.fillStyle = 'rgba(11,13,36,0.5)';
+    for (let y = CAP + 7, riga = 0; y < H; y += 8, riga++) {
+      x.fillRect(2, y, W - 4, 1);
+      x.fillRect(riga % 2 ? 9 : 17, y - 7, 1, 7);
+    }
+    // imperfezioni della pietra e ciuffi di muschio
+    for (let i = 0; i < 46; i++) {
+      x.fillStyle = rnd() < 0.5 ? 'rgba(11,13,36,0.22)' : 'rgba(255,255,255,0.2)';
+      x.fillRect(2 + Math.floor(rnd() * (W - 4)), CAP + Math.floor(rnd() * (H - CAP)), 1, 1);
+    }
+    for (let i = 0; i < 8; i++) {
+      const mx = 2 + Math.floor(rnd() * (W - 7));
+      const my = CAP + 2 + Math.floor(rnd() * (H - CAP - 6));
+      x.fillStyle = '#2f9e86'; x.fillRect(mx, my, 3, 1); x.fillRect(mx + 1, my + 1, 2, 1);
+      x.fillStyle = '#4cc79a'; x.fillRect(mx + 1, my, 1, 1);
+    }
+
+    // capitello: lastra, fregio con rune, modanatura
+    x.clearRect(0, 0, W, CAP);
+    x.fillStyle = C.contorno; x.fillRect(0, 0, W, 4);
+    x.fillStyle = '#b9c4ec';  x.fillRect(1, 1, W - 2, 2);
+    x.fillStyle = '#e3e9ff';  x.fillRect(1, 1, W - 9, 1);
+    x.fillStyle = '#7c8abf';  x.fillRect(W - 8, 1, 7, 2);
+    x.fillStyle = C.contorno; x.fillRect(1, 4, W - 2, 6);
+    x.fillStyle = '#1d2450';  x.fillRect(2, 4, W - 4, 5);
+    x.fillStyle = C.ciano;
+    for (let i = 0; i < RUNE.length; i++) {
+      for (let r = 0; r < 5; r++) {
+        for (let c = 0; c < 3; c++) {
+          if (RUNE[i][r][c] === '#') x.fillRect(3 + i * 5 + c, 4 + r, 1, 1);
+        }
+      }
+    }
+    x.fillStyle = C.contorno; x.fillRect(0, 9, W, 3);
+    x.fillStyle = '#98a6d6';  x.fillRect(1, 10, W - 2, 1);
+    x.fillStyle = '#e3e9ff';  x.fillRect(1, 10, 6, 1);
+    x.fillStyle = '#606da1';  x.fillRect(W - 8, 10, 7, 1);
+    return t;
+  }
+
+  /* ---------- 4.8 Medaglie, icone e riquadri ---------- */
+  function creaMedaglia(base, chiaro, scuro) {
+    const [t, x] = nuovaTela(24, 24);
+    cerchio(x, 12, 12, 11, C.contorno);
+    cerchio(x, 12, 12, 10, scuro);
+    cerchio(x, 12, 12, 8, chiaro);
+    cerchio(x, 13, 13, 7, base);
+    cerchio(x, 12, 12, 4, scuro);                       // emblema: falce di luna
+    cerchio(x, 14, 11, 3, base);
+    return raddoppia(t);
+  }
+
+  function creaMedagliaVuota() {
+    const [t, x] = nuovaTela(24, 24);
+    cerchio(x, 12, 12, 11, C.contorno);
+    cerchio(x, 12, 12, 10, '#2a3266');
+    cerchio(x, 12, 12, 9, '#141a40');
+    return raddoppia(t);
+  }
+
+  // Riquadro con angoli smussati: contorno scuro, bordo, fondo
+  function riquadro(x0, y0, w, h, fondo, bordo) {
+    g.fillStyle = C.contorno;
+    g.fillRect(x0 + 2, y0, w - 4, h);
+    g.fillRect(x0, y0 + 2, w, h - 4);
+    g.fillStyle = bordo;
+    g.fillRect(x0 + 4, y0 + 2, w - 8, h - 4);
+    g.fillRect(x0 + 2, y0 + 4, w - 4, h - 8);
+    g.fillStyle = fondo;
+    g.fillRect(x0 + 4, y0 + 4, w - 8, h - 8);
+  }
+
+  const ICONA_AUDIO_SI = iconaDaMappa([
+    '...#.....',
+    '..##..#..',
+    '####...#.',
+    '####.#.#.',
+    '####.#.#.',
+    '####...#.',
+    '..##..#..',
+    '...#.....'
+  ], C.crema);
+  const ICONA_AUDIO_NO = iconaDaMappa([
+    '...#.....',
+    '..##.....',
+    '####.#.#.',
+    '####..#..',
+    '####.#.#.',
+    '####.....',
+    '..##.....',
+    '...#.....'
+  ], '#8d96c4');
+  const ICONA_FRECCIA = iconaDaMappa([
+    '...#...',
+    '..###..',
+    '.#####.',
+    '#######',
+    '..###..',
+    '..###..',
+    '..###..'
+  ], C.crema);
+
+  // Tutte le immagini pronte all'uso
+  const IMG_CIELO = creaCielo();
+  const IMG_COLLINE_LONTANE = creaColline('#1c2862', '#2e3f86', 44, 14, 2, 5, 0.6);
+  const IMG_COLLINE_VICINE = creaColline('#141c4c', '#222e6c', 24, 9, 3, 7, 2.1);
+  const IMG_BOSCO = creaBosco();
+  const IMG_TERRENO = creaTerreno();
+  const IMG_COLONNA_SOTTO = (function () { return raddoppia(creaColonna()); })();
+  const IMG_COLONNA_SOPRA = capovolgi(IMG_COLONNA_SOTTO);
+  const IMG_MEDAGLIA_VUOTA = creaMedagliaVuota();
+  MEDAGLIE.forEach(function (m) { m.img = creaMedaglia(m.base, m.chiaro, m.scuro); });
+
+  // Zone cliccabili (in coordinate logiche)
+  const PULS_AUDIO = { x: LARGHEZZA - 36, y: 6, w: 30, h: 28 };
+  const PANNELLO = { x: 26, y: 150, w: 236, h: 128 };
+  const PULS_RIGIOCA = { x: 55, y: 296, w: 178, h: 38 };
+
+
+  /* ====================================================================
+     5. AUDIO (Web Audio API, nessun file)
+     ==================================================================== */
+
+  let actx = null;                       // AudioContext, creato al primo gesto dell'utente
+  let guadagno = null;                   // volume generale
+  let bufRumore = null;                  // un secondo di rumore bianco riutilizzabile
+  let audioAttivo = leggiMemoria(CHIAVE_AUDIO, '1') !== '0';
+
+  function creaAudio() {
+    if (actx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try {
+      actx = new AC();
+      guadagno = actx.createGain();
+      guadagno.gain.value = audioAttivo ? VOLUME : 0;
+      guadagno.connect(actx.destination);
+      const n = Math.floor(actx.sampleRate);
+      bufRumore = actx.createBuffer(1, n, actx.sampleRate);
+      const d = bufRumore.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+      // iOS: un suono (anche muto) dentro il gesto dell'utente sblocca l'audio
+      const s = actx.createBufferSource();
+      s.buffer = actx.createBuffer(1, 1, 22050);
+      s.connect(actx.destination);
+      s.start(0);
+    } catch (e) {
+      actx = null;
+    }
+  }
+
+  // Da chiamare dentro un gesto dell'utente (tocco, clic, tasto)
+  function sbloccaAudio() {
+    creaAudio();
+    if (actx && actx.state !== 'running' && !document.hidden) {
+      const p = actx.resume();
+      if (p && p.catch) p.catch(function () { /* riproveremo al prossimo gesto */ });
+    }
+  }
+
+  function audioPronto() { return actx && audioAttivo && actx.state === 'running'; }
+
+  // Nota con oscillatore: glissando da f0 a f1
+  function tono(tipo, f0, f1, durata, volume, ritardo) {
+    if (!audioPronto()) return;
+    try {
+      const t = actx.currentTime + (ritardo || 0);
+      const o = actx.createOscillator();
+      const gn = actx.createGain();
+      o.type = tipo;
+      o.frequency.setValueAtTime(f0, t);
+      if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t + durata);
+      gn.gain.setValueAtTime(0.0001, t);
+      gn.gain.linearRampToValueAtTime(volume, t + 0.008);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t + durata);
+      o.connect(gn); gn.connect(guadagno);
+      o.start(t); o.stop(t + durata + 0.03);
+    } catch (e) { /* un effetto mancato non deve fermare il gioco */ }
+  }
+
+  // Soffio di rumore filtrato: il filtro scivola da f0 a f1
+  function rumore(durata, volume, tipoFiltro, f0, f1, q, ritardo) {
+    if (!audioPronto()) return;
+    try {
+      const t = actx.currentTime + (ritardo || 0);
+      const src = actx.createBufferSource();
+      const filtro = actx.createBiquadFilter();
+      const gn = actx.createGain();
+      src.buffer = bufRumore; src.loop = true;
+      filtro.type = tipoFiltro; filtro.Q.value = q;
+      filtro.frequency.setValueAtTime(f0, t);
+      filtro.frequency.exponentialRampToValueAtTime(f1, t + durata);
+      gn.gain.setValueAtTime(0.0001, t);
+      gn.gain.linearRampToValueAtTime(volume, t + 0.012);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t + durata);
+      src.connect(filtro); filtro.connect(gn); gn.connect(guadagno);
+      src.start(t, Math.random() * 0.5); src.stop(t + durata + 0.03);
+    } catch (e) { /* idem */ }
+  }
+
+  const suoni = {
+    ala: function () {                                  // battito d'ala: soffio breve
+      rumore(0.10, 0.35, 'bandpass', 1100, 420, 1.1);
+      tono('triangle', 300, 440, 0.07, 0.10);
+    },
+    punto: function () {                                // punto: due note ascendenti
+      tono('square', 880, 880, 0.07, 0.09);
+      tono('square', 1318, 1318, 0.18, 0.09, 0.07);
+    },
+    colpo: function () {                                // impatto: botto sordo
+      rumore(0.20, 0.7, 'lowpass', 2200, 180, 0.7);
+      tono('sine', 170, 45, 0.22, 0.6);
+    },
+    caduta: function (ritardo) {                        // caduta: fischio discendente
+      tono('triangle', 760, 150, 0.42, 0.20, ritardo);
+    },
+    tonfo: function () {                                // arrivo a terra
+      tono('sine', 110, 40, 0.14, 0.45);
+    },
+    swoosh: function () {                               // transizioni tra schermate
+      rumore(0.24, 0.32, 'bandpass', 350, 2600, 0.9);
+    }
+  };
+
+  function alternaAudio() {
+    audioAttivo = !audioAttivo;
+    scriviMemoria(CHIAVE_AUDIO, audioAttivo ? '1' : '0');
+    if (guadagno) guadagno.gain.value = audioAttivo ? VOLUME : 0;
+    if (audioAttivo) tono('square', 880, 880, 0.06, 0.08);
+  }
+
+
+  /* ====================================================================
+     6. STATO DI GIOCO
+     ==================================================================== */
+
+  const STATO = { TITOLO: 0, PRONTI: 1, GIOCO: 2, CADUTA: 3, FINE: 4 };
+
+  let stato = STATO.TITOLO;
+  let tick = 0;                          // passi logici dall'avvio
+  let tStato = 0;                        // passi logici nello stato corrente
+  let inPausa = false;
+
+  let punteggio = 0;
+  let record = parseInt(leggiMemoria(CHIAVE_RECORD, '0'), 10) || 0;
+  let nuovoRecord = false;
+  let saltoPunteggio = 0;                // piccolo rimbalzo del numero quando si segna
+
+  let scorr = 0;                         // distanza totale percorsa dal mondo (px)
+  let scorrPrec = 0;                     // valore al passo precedente (per l'interpolazione)
+  let ostacoli = [];                     // { x (nel mondo), yApertura, superato }
+  let prossimoX = 0;                     // x nel mondo della prossima coppia da creare
+
+  const pip = {
+    x: LARGHEZZA / 2, y: Y_ATTESA, yPrec: Y_ATTESA,
+    vy: 0, rot: 0, rotPrec: 0,
+    fotogramma: 0, aTerra: false
+  };
+
+  let flash = 0;                         // lampo bianco residuo (tick)
+  let scossa = 0;                        // tremolio dello schermo residuo (tick)
+  const diss = { attiva: false, t: 0, azione: null };   // dissolvenza tra schermate
+
+  function vaiAPronti() {
+    stato = STATO.PRONTI; tStato = 0;
+    punteggio = 0; nuovoRecord = false;
+    ostacoli = [];
+    pip.x = PIP_X;
+    pip.y = pip.yPrec = Y_ATTESA;
+    pip.vy = 0;
+    pip.rot = pip.rotPrec = 0;
+    pip.fotogramma = 0;
+    pip.aTerra = false;
+  }
+
+  function iniziaGioco() {
+    stato = STATO.GIOCO; tStato = 0;
+    prossimoX = Math.round(scorr) + LARGHEZZA + ANTICIPO_PRIMO_OSTACOLO;
+  }
+
+  // Battito d'ala: la velocità verticale viene azzerata e sostituita dall'impulso
+  function batti() {
+    pip.vy = IMPULSO_SALTO;
+    suoni.ala();
+  }
+
+  function muori(colpitoTerreno) {
+    stato = STATO.CADUTA; tStato = 0;
+    flash = DURATA_FLASH;
+    scossa = 10;
+    pip.aTerra = colpitoTerreno;
+    if (pip.vy < 0) pip.vy = 0;
+    suoni.colpo();
+    if (!colpitoTerreno) suoni.caduta(0.12);
+    if (punteggio > record) {
+      record = punteggio;
+      nuovoRecord = true;
+      scriviMemoria(CHIAVE_RECORD, String(record));
+    }
+  }
+
+  function avviaDissolvenza(azione) {
+    diss.attiva = true; diss.t = 0; diss.azione = azione;
+    suoni.swoosh();
+  }
+
+  function mettiInPausa() {
+    if (stato === STATO.GIOCO) inPausa = true;
+  }
+
+  function medagliaPer(punti) {
+    for (const m of MEDAGLIE) if (punti >= m.min) return m;
+    return null;
+  }
+
+
+  /* ====================================================================
+     7. INPUT
+     --------------------------------------------------------------------
+     Un solo comando: tocco / clic / barra spaziatrice. Si usa pointerdown
+     (risposta immediata, nessun ritardo di 300 ms, nessun doppio evento
+     touch+click).
+     ==================================================================== */
+
+  function dentro(x, y, r, margine) {
+    const m = margine || 0;
+    return x >= r.x - m && x <= r.x + r.w + m && y >= r.y - m && y <= r.y + r.h + m;
+  }
+
+  // x, y in coordinate logiche; daTastiera = true se viene da un tasto
+  function premi(x, y, daTastiera) {
+    if (mqRuota.matches) return;                        // avviso "ruota il telefono" visibile
+
+    if (!daTastiera && dentro(x, y, PULS_AUDIO, 8)) { alternaAudio(); return; }
+
+    if (inPausa) {                                      // il tocco riprende e batte subito le ali
+      inPausa = false;
+      batti();
+      return;
+    }
+    if (diss.attiva) return;
+
+    switch (stato) {
+      case STATO.TITOLO:
+        avviaDissolvenza(vaiAPronti);
+        break;
+      case STATO.PRONTI:
+        iniziaGioco();
+        batti();
+        break;
+      case STATO.GIOCO:
+        batti();
+        break;
+      case STATO.FINE:
+        // attivo solo dopo ~0,5 s, per evitare tocchi accidentali
+        if (tStato >= RITARDO_RIGIOCA && (daTastiera || dentro(x, y, PULS_RIGIOCA, 6))) {
+          avviaDissolvenza(vaiAPronti);
+        }
+        break;
+      default:
+        break;                                          // durante la caduta non si fa nulla
+    }
+  }
+
+  function coordinateLogiche(clientX, clientY) {
+    const r = tela.getBoundingClientRect();
+    return {
+      x: (clientX - r.left) / (r.width || 1) * LARGHEZZA,
+      y: (clientY - r.top) / (r.height || 1) * ALTEZZA
+    };
+  }
+
+  if (window.PointerEvent) {
+    window.addEventListener('pointerdown', function (e) {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      if (e.pointerType === 'mouse') sbloccaAudio();    // col mouse il clic vale già come gesto
+      const p = coordinateLogiche(e.clientX, e.clientY);
+      premi(p.x, p.y, false);
+    }, { passive: false });
+  } else {
+    // Ripiego per browser senza Pointer Events
+    window.addEventListener('touchstart', function (e) {
+      e.preventDefault();                               // niente click sintetico dopo il tocco
+      const tocco = e.changedTouches[0];
+      const p = coordinateLogiche(tocco.clientX, tocco.clientY);
+      premi(p.x, p.y, false);
+    }, { passive: false });
+    window.addEventListener('mousedown', function (e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      sbloccaAudio();
+      const p = coordinateLogiche(e.clientX, e.clientY);
+      premi(p.x, p.y, false);
+    });
+  }
+
+  window.addEventListener('keydown', function (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;     // lascia stare le scorciatoie del browser
+    switch (e.code) {
+      case 'Space': case 'ArrowUp': case 'KeyW': case 'Enter':
+        e.preventDefault();                             // la barra spaziatrice non deve scorrere la pagina
+        sbloccaAudio();
+        if (!e.repeat) premi(-1, -1, true);
+        break;
+      case 'KeyM':
+        sbloccaAudio();
+        if (!e.repeat) alternaAudio();
+        break;
+      case 'KeyP': case 'Escape':
+        if (!e.repeat) {
+          if (inPausa) inPausa = false;
+          else mettiInPausa();
+        }
+        break;
+      default:
+        break;
+    }
+  });
+
+  // Sblocco dell'audio: i browser lo permettono solo alla fine di un gesto
+  ['pointerup', 'touchend', 'click'].forEach(function (tipo) {
+    window.addEventListener(tipo, function () {
+      if (!actx || actx.state !== 'running') sbloccaAudio();
+    });
+  });
+
+  // Niente scroll, zoom, menu contestuale o selezione
+  document.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+  ['contextmenu', 'gesturestart', 'gesturechange', 'dblclick', 'selectstart', 'dragstart'].forEach(function (tipo) {
+    document.addEventListener(tipo, function (e) { e.preventDefault(); });
+  });
+
+  // Pausa automatica quando la scheda o la finestra perdono il focus
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      mettiInPausa();
+      if (actx && actx.state === 'running') actx.suspend();
+    } else {
+      ultimoTempo = 0;                                  // evita un salto di tempo al rientro
+      if (actx && actx.state === 'suspended') {
+        const p = actx.resume();
+        if (p && p.catch) p.catch(function () {});
+      }
+    }
+  });
+  window.addEventListener('blur', mettiInPausa);
+  window.addEventListener('pagehide', mettiInPausa);
+
+  // Ridimensionamento e cambio di orientamento
+  function suCambioSchermo() {
+    if (mqRuota.matches) mettiInPausa();
+    ridimensiona();
+    // iOS aggiorna le dimensioni con un attimo di ritardo dopo la rotazione
+    window.setTimeout(ridimensiona, 120);
+    window.setTimeout(ridimensiona, 500);
+  }
+  window.addEventListener('resize', suCambioSchermo);
+  window.addEventListener('orientationchange', suCambioSchermo);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', ridimensiona);
+  if (mqRuota.addEventListener) mqRuota.addEventListener('change', suCambioSchermo);
+  else if (mqRuota.addListener) mqRuota.addListener(suCambioSchermo);
+
+
+  /* ====================================================================
+     8. AGGIORNAMENTO (un passo logico = 1/60 di secondo)
+     ==================================================================== */
+
+  function animaAli() {
+    if (tick % TICK_PER_FRAME_ALA === 0) pip.fotogramma = (pip.fotogramma + 1) % SEQUENZA_ALI.length;
+  }
+
+  function collisioneCerchioRettangolo(cx, cy, r, rx, ry, rw, rh) {
+    const px = limita(cx, rx, rx + rw);
+    const py = limita(cy, ry, ry + rh);
+    const dx = cx - px, dy = cy - py;
+    return dx * dx + dy * dy < r * r;
+  }
+
+  function aggiornaGioco() {
+    // --- fisica del pipistrello ---
+    pip.vy = Math.min(pip.vy + GRAVITA, VEL_MAX_CADUTA);
+    pip.y += pip.vy;
+    if (pip.y < RAGGIO_HITBOX) {                        // il cielo non uccide, ma non si esce dall'alto
+      pip.y = RAGGIO_HITBOX;
+      if (pip.vy < 0) pip.vy = 0;
+    }
+
+    // --- rotazione: muso in su dopo il battito, poi giù fino alla picchiata ---
+    if (pip.vy < SOGLIA_PICCHIATA) pip.rot = Math.max(ROT_SU, pip.rot - VEL_ROT_SU);
+    else pip.rot = Math.min(ROT_GIU, pip.rot + VEL_ROT_GIU);
+
+    if (pip.rot > 1.05) pip.fotogramma = 1;             // in picchiata tiene le ali ferme
+    else animaAli();
+
+    // --- scorrimento del mondo e creazione degli ostacoli ---
+    scorr += VEL_SCORRIMENTO;
+    while (prossimoX < scorr + LARGHEZZA + 8) {
+      ostacoli.push({
+        x: prossimoX,
+        yApertura: casualeIntero(MARGINE_APERTURA, Y_TERRENO - MARGINE_APERTURA - APERTURA),
+        superato: false
+      });
+      prossimoX += DISTANZA_OSTACOLI;
+    }
+    while (ostacoli.length && ostacoli[0].x + LARGHEZZA_OSTACOLO + 8 < scorr) ostacoli.shift();
+
+    // --- punteggio e collisioni ---
+    const xMondo = scorr + pip.x;
+    for (const o of ostacoli) {
+      if (!o.superato && xMondo > o.x + LARGHEZZA_OSTACOLO / 2) {
+        o.superato = true;
+        punteggio++;
+        saltoPunteggio = 6;
+        suoni.punto();
+      }
+      const sx = o.x - scorr;
+      if (sx > pip.x + RAGGIO_HITBOX || sx + LARGHEZZA_OSTACOLO < pip.x - RAGGIO_HITBOX) continue;
+      if (collisioneCerchioRettangolo(pip.x, pip.y, RAGGIO_HITBOX, sx, -1000, LARGHEZZA_OSTACOLO, 1000 + o.yApertura) ||
+          collisioneCerchioRettangolo(pip.x, pip.y, RAGGIO_HITBOX, sx, o.yApertura + APERTURA, LARGHEZZA_OSTACOLO, 1000)) {
+        muori(false);
+        return;
+      }
+    }
+    if (pip.y + RAGGIO_HITBOX >= Y_TERRENO) {           // toccare il terreno = fine
+      pip.y = Y_TERRENO - RAGGIO_HITBOX;
+      muori(true);
+    }
+  }
+
+  function aggiorna() {
+    tick++;
+    tStato++;
+
+    // valori del passo precedente, usati dal disegno per interpolare
+    scorrPrec = scorr;
+    pip.yPrec = pip.y;
+    pip.rotPrec = pip.rot;
+
+    if (flash > 0) flash--;
+    if (scossa > 0) scossa--;
+    if (saltoPunteggio > 0) saltoPunteggio--;
+
+    if (diss.attiva) {
+      diss.t++;
+      if (diss.t === DURATA_DISSOLVENZA) diss.azione();           // a schermo buio si cambia scena
+      else if (diss.t >= DURATA_DISSOLVENZA * 2) diss.attiva = false;
+    }
+
+    switch (stato) {
+      case STATO.TITOLO:
+      case STATO.PRONTI:
+        // il mondo scorre e il pipistrello fluttua su e giù
+        scorr += VEL_SCORRIMENTO;
+        pip.y = Y_ATTESA + Math.sin(tick * 0.11) * 6;
+        animaAli();
+        break;
+
+      case STATO.GIOCO:
+        aggiornaGioco();
+        break;
+
+      case STATO.CADUTA:
+        // il mondo è fermo; il pipistrello cade fino al terreno
+        pip.rot = Math.min(ROT_GIU, pip.rot + VEL_ROT_GIU * 1.5);
+        if (!pip.aTerra) {
+          pip.vy = Math.min(pip.vy + GRAVITA, VEL_MAX_CADUTA);
+          pip.y += pip.vy;
+          if (pip.y + RAGGIO_HITBOX >= Y_TERRENO) {
+            pip.y = Y_TERRENO - RAGGIO_HITBOX;
+            pip.aTerra = true;
+            tStato = 0;
+            suoni.tonfo();
+          }
+        } else if (tStato >= ATTESA_PANNELLO) {
+          stato = STATO.FINE; tStato = 0;
+          suoni.swoosh();
+        }
+        break;
+
+      default:
+        break;                                          // FINE: solo animazioni del pannello
+    }
+  }
+
+
+  /* ====================================================================
+     9. DISEGNO
+     ==================================================================== */
+
+  // Strato di sfondo ripetuto in orizzontale con scorrimento in parallasse
+  function disegnaStrato(img, spostamento) {
+    const x = -(Math.floor(spostamento) % LARGHEZZA);
+    const y = Y_TERRENO - img.height;
+    g.drawImage(img, x, y);
+    g.drawImage(img, x + LARGHEZZA, y);
+  }
+
+  function disegnaStelle() {
+    for (const s of STELLE) {
+      const b = Math.sin(tick * s.vel + s.fase);
+      g.fillStyle = b > 0.35 ? '#ffffff' : (b > -0.35 ? '#aeb9e8' : '#5d6aa8');
+      g.fillRect(s.x, s.y, 2, 2);
+      if (s.grande && b > 0.35) {
+        g.fillRect(s.x - 2, s.y, 6, 2);
+        g.fillRect(s.x, s.y - 2, 2, 6);
+      }
+    }
+  }
+
+  function disegnaPipistrello(x, y, rot) {
+    const img = SPRITE_PIP[SEQUENZA_ALI[pip.fotogramma]];
+    g.save();
+    g.translate(Math.round(x), Math.round(y));
+    g.rotate(rot);
+    g.drawImage(img, -ANCORA_PIP_X, -ANCORA_PIP_Y);
+    g.restore();
+  }
+
+  function disegnaMondo(alfa) {
+    // interpolazione tra passo precedente e passo attuale: movimento fluido a 90/120 Hz
+    const sc = Math.round(scorrPrec + (scorr - scorrPrec) * alfa);
+    const py = pip.yPrec + (pip.y - pip.yPrec) * alfa;
+    const pr = pip.rotPrec + (pip.rot - pip.rotPrec) * alfa;
+
+    g.drawImage(IMG_CIELO, 0, 0);
+    disegnaStelle();
+    disegnaStrato(IMG_COLLINE_LONTANE, sc * 0.06);
+    disegnaStrato(IMG_COLLINE_VICINE, sc * 0.12);
+    disegnaStrato(IMG_BOSCO, sc * 0.3);
+
+    for (const o of ostacoli) {
+      const x = Math.round(o.x - sc) - 2;               // il capitello sporge di 2 px per lato
+      g.drawImage(IMG_COLONNA_SOPRA, x, o.yApertura - IMG_COLONNA_SOPRA.height);
+      g.drawImage(IMG_COLONNA_SOTTO, x, o.yApertura + APERTURA);
+    }
+
+    g.drawImage(IMG_TERRENO, -(sc % PERIODO_TERRENO), Y_TERRENO);
+    disegnaPipistrello(pip.x, py, pr);
+  }
+
+  function disegnaPunteggio() {
+    testo(String(punteggio), LARGHEZZA / 2, 22 - (saltoPunteggio > 3 ? 2 : 0), 4, C.bianco, { ombra: 2 });
+  }
+
+  function disegnaPulsanteAudio() {
+    const p = PULS_AUDIO;
+    g.fillStyle = 'rgba(9,12,38,0.55)';
+    g.fillRect(p.x + 2, p.y, p.w - 4, p.h);
+    g.fillRect(p.x, p.y + 2, p.w, p.h - 4);
+    g.drawImage(audioAttivo ? ICONA_AUDIO_SI : ICONA_AUDIO_NO, p.x + 4, p.y + 4);
+  }
+
+  function disegnaPulsante(p, etichetta, attivo) {
+    g.fillStyle = 'rgba(5,7,26,0.5)';
+    g.fillRect(p.x + 2, p.y + 4, p.w, p.h);                       // ombra
+    riquadro(p.x, p.y, p.w, p.h, attivo ? C.arancio : '#4a5080', attivo ? '#ffd08a' : '#7c84b0');
+    g.fillStyle = attivo ? '#d9702a' : '#3a3f6a';
+    g.fillRect(p.x + 4, p.y + p.h - 8, p.w - 8, 4);
+    testo(etichetta, p.x + p.w / 2, p.y + 11, 2, attivo ? C.bianco : '#b0b6d8');
+  }
+
+  function disegnaTitolo() {
+    const su = Math.round(Math.sin(tick * 0.05) * 3);
+    testo('NOTTOLA', LARGHEZZA / 2, 100 + su, 6, C.crema, { ombra: 4 });
+    testo('VOLO NOTTURNO', LARGHEZZA / 2, 160 + su, 2, C.ciano);
+    if (Math.floor(tick / 30) % 2 === 0) testo('TOCCA PER GIOCARE', LARGHEZZA / 2, 306, 2, C.bianco);
+    if (record > 0) testo('RECORD ' + record, LARGHEZZA / 2, 340, 2, C.arancio);
+    if (puntatorePreciso) {
+      testo('SPAZIO: VOLA   M: AUDIO   P: PAUSA', LARGHEZZA / 2, 474, 1, '#8d96c4', { contorno: null });
+    }
+  }
+
+  function disegnaPronti() {
+    disegnaPunteggio();
+    testo('PRONTI?', LARGHEZZA / 2, 104, 4, C.crema, { ombra: 2 });
+    const su = Math.floor(tick / 15) % 2 ? 0 : -4;
+    g.drawImage(ICONA_FRECCIA, Math.round(LARGHEZZA / 2 - ICONA_FRECCIA.width / 2), 300 + su);
+    testo('TOCCA PER VOLARE', LARGHEZZA / 2, 326, 2, C.bianco);
+  }
+
+  function disegnaFine() {
+    const t = tStato;
+
+    // scritta che scende dall'alto
+    const kt = limita(t / 10, 0, 1);
+    testo('GAME OVER', LARGHEZZA / 2, 84 - Math.round((1 - kt) * 24), 4, C.arancio, { ombra: 2 });
+
+    // pannello che sale dal basso con rallentamento finale
+    const kp = limita((t - 6) / 20, 0, 1);
+    const e = 1 - Math.pow(1 - kp, 3);
+    const px = PANNELLO.x;
+    const py = Math.round(PANNELLO.y + (1 - e) * (ALTEZZA - PANNELLO.y));
+    riquadro(px, py, PANNELLO.w, PANNELLO.h, '#1b2352', '#c9d3f5');
+
+    // il punteggio "conta" fino al valore finale
+    const mostrato = Math.min(punteggio, Math.max(0, Math.floor((t - 26) * Math.max(0.5, punteggio / 45))));
+    const finito = kp >= 1 && mostrato >= punteggio;
+
+    // colonna sinistra: medaglia
+    const mx = px + 62;
+    testo('MEDAGLIA', mx, py + 14, 2, C.ciano, { contorno: null });
+    const med = finito ? medagliaPer(punteggio) : null;
+    g.drawImage(med ? med.img : IMG_MEDAGLIA_VUOTA, mx - 24, py + 38);
+    if (med) {
+      testo(med.nome, mx, py + 96, 2, med.base);
+      // luccichio sulla medaglia
+      const fase = t % 40;
+      if (fase < 12) {
+        const n = Math.floor(t / 40);
+        const lx = mx - 12 + (n * 37 % 25), ly = py + 50 + (n * 53 % 25);
+        g.fillStyle = C.bianco;
+        g.fillRect(lx, ly, 2, 2);
+        if (fase > 3 && fase < 9) { g.fillRect(lx - 2, ly, 6, 2); g.fillRect(lx, ly - 2, 2, 6); }
+      }
+    }
+
+    // colonna destra: punteggio e record
+    const dx = px + PANNELLO.w - 16;
+    testo('PUNTI', dx, py + 14, 2, C.ciano, { allinea: 'd', contorno: null });
+    testo(String(mostrato), dx, py + 34, 3, C.bianco, { allinea: 'd' });
+    testo('RECORD', dx, py + 68, 2, C.ciano, { allinea: 'd', contorno: null });
+    testo(String(record), dx, py + 88, 3, nuovoRecord ? C.arancio : C.bianco, { allinea: 'd' });
+    if (nuovoRecord && finito && Math.floor(t / 12) % 2 === 0) {
+      testo('NUOVO!', dx - 76, py + 71, 1, '#ff6b6b', { allinea: 'd' });
+    }
+
+    if (kp >= 1) disegnaPulsante(PULS_RIGIOCA, 'GIOCA ANCORA', t >= RITARDO_RIGIOCA);
+  }
+
+  function disegnaPausa() {
+    g.fillStyle = 'rgba(9,12,38,0.62)';
+    g.fillRect(0, 0, LARGHEZZA, ALTEZZA);
+    testo('PAUSA', LARGHEZZA / 2, 196, 4, C.crema, { ombra: 2 });
+    testo('TOCCA PER RIPRENDERE', LARGHEZZA / 2, 244, 2, C.bianco);
+  }
+
+  function disegna(alfa) {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
+    g.fillStyle = '#090c26';
+    g.fillRect(0, 0, LARGHEZZA, ALTEZZA);
+
+    // tremolio dello schermo all'impatto
+    if (scossa > 0) {
+      g.translate(Math.round((Math.random() * 2 - 1) * scossa * 0.4),
+                  Math.round((Math.random() * 2 - 1) * scossa * 0.4));
+    }
+    disegnaMondo(alfa);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+
+    // interfaccia dello stato corrente
+    if (stato === STATO.TITOLO) disegnaTitolo();
+    else if (stato === STATO.PRONTI) disegnaPronti();
+    else if (stato === STATO.GIOCO || stato === STATO.CADUTA) disegnaPunteggio();
+    else disegnaFine();
+
+    if (inPausa) disegnaPausa();
+    disegnaPulsanteAudio();
+
+    if (flash > 0) {                                    // lampo bianco
+      g.globalAlpha = flash / DURATA_FLASH * 0.9;
+      g.fillStyle = C.bianco;
+      g.fillRect(0, 0, LARGHEZZA, ALTEZZA);
+      g.globalAlpha = 1;
+    }
+    if (diss.attiva) {                                  // dissolvenza tra schermate
+      const d = diss.t / DURATA_DISSOLVENZA;
+      g.globalAlpha = limita(d <= 1 ? d : 2 - d, 0, 1);
+      g.fillStyle = '#05071a';
+      g.fillRect(0, 0, LARGHEZZA, ALTEZZA);
+      g.globalAlpha = 1;
+    }
+
+    // copia del buffer sulla tela visibile, senza sfocatura
+    ctx.drawImage(buffer, 0, 0, tela.width, tela.height);
+  }
+
+
+  /* ====================================================================
+     10. CICLO PRINCIPALE
+     --------------------------------------------------------------------
+     Passo fisso a 60 Hz con accumulatore: a ogni fotogramma del browser
+     si eseguono tanti passi logici quanti ne servono per il tempo reale
+     trascorso, poi si disegna interpolando. Così la fisica non dipende
+     dalla frequenza dello schermo.
+     ==================================================================== */
+
+  let ultimoTempo = 0;
+  let accumulo = 0;
+
+  function ciclo(adesso) {
+    window.requestAnimationFrame(ciclo);
+
+    if (!ultimoTempo) ultimoTempo = adesso;
+    let dt = adesso - ultimoTempo;
+    ultimoTempo = adesso;
+    if (dt < 0) dt = 0;
+    if (dt > 250) dt = PASSO_MS;                        // rientro da una sospensione: niente salti
+
+    if (!inPausa) {
+      accumulo += dt;
+      let passi = 0;
+      // piccola tolleranza: 2 × 8,333 ms (120 Hz) deve valere un passo intero
+      while (accumulo >= PASSO_MS - 0.01 && passi < 6) {
+        aggiorna();
+        accumulo -= PASSO_MS;
+        passi++;
+      }
+      if (accumulo >= PASSO_MS) accumulo = 0;           // dispositivo troppo lento: si rinuncia al recupero
+    }
+    disegna(limita(accumulo / PASSO_MS, 0, 1));
+  }
+
+  // Avvio
+  ridimensiona();
+  window.requestAnimationFrame(ciclo);
+})();
+</script>
+</body>
+</html>
